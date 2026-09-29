@@ -1,22 +1,44 @@
 [project]
 name = "hackathon"
 version = "0.1.0"
-description = "Add your description here"
+description = "Human-approved collaborative-agent transaction review on Flower"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
+license = "MIT"
 dependencies = [
-    "alpaca-py>=0.44.0",
-    "duckdb>=1.5.5",
-    "exchange-calendars>=4.13.2",
-    "marimo>=0.24.2",
-    "numpy>=2.5.3",
-    "pandas>=3.0.6",
-    "pyarrow>=25.0.1",
+    "flwr>=1.39.0,<2.0",
+    "openai>=2.16.0,<3.0.0",
+    "pydantic>=2.12.0,<3.0.0",
+    "python-dotenv>=1.2.0,<2.0.0",
 ]
 
 [project.scripts]
-hackathon = "hackathon:main"
+hackathon = "hackathon.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0,<10.0.0",
+    "ruff==0.14.14",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.flwr.app]
+publisher = "neuvos"
+flwr-version-target = "1.39.0"
+
+[tool.flwr.app.components]
+agentapp = "hackathon.flower_app:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
