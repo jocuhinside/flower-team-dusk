@@ -1,0 +1,53 @@
+# Three SuperNodes for the Team Dusk accountability chain on SuperGrid.
+# Reads SPONSOR_API_KEY and AGENT_MODEL from ./.env (compose loads it automatically).
+# Register keys first: see the runbook (flwr supernode register keys/supernode-N.pub supergrid ...).
+x-supernode: &supernode
+  image: flwr/supernode:1.39.0
+  restart: unless-stopped
+  environment: &env
+    FLWR_MODEL_API_KEY: ${SPONSOR_API_KEY:?set SPONSOR_API_KEY in .env}
+    FLWR_MODEL_API_ENDPOINT: https://api.tokenfactory.tf-ca1.nebius.com/v1/responses
+    AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
+
+services:
+  supernode-0:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-0
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: invoice-reader
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-0
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-0:/data/node-0
+
+  supernode-1:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-1
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: vendor-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-1
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-1:/data/node-1
+
+  supernode-2:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-2
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: budget-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-2
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-2:/data/node-2
