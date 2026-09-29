@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .env
+.env.*
+!.env.example
 .pytest_cache/
 .ruff_cache/
 *.fab
@@ -20,3 +22,4 @@ Claude outputs/
 accountability-runs/
 rpc-credentials.env
 ansible/inventory.ini
+data/

@@ -20,7 +20,7 @@ Each team submits four things (per the event post):
 - [x] README: pitch, run steps, claim boundaries (done 29 Sep).
 
 ## Model access on the day
-- Nebius API key is shared in the Slack channel during the event. The Flower runtime reads `FLWR_MODEL_API_KEY` and `FLWR_MODEL_API_ENDPOINT`; our app accepts those or the `SPONSOR_*` names. **`SPONSOR_MODEL` must also be set** (the model-name variable in the event post was cut off; ask a mentor which variable the runtime uses).
+- Nebius API key is shared in the Slack channel during the event. The Flower runtime reads `FLWR_MODEL_API_KEY` and `FLWR_MODEL_API_ENDPOINT`; our app accepts those or the `SPONSOR_*` names. On SuperGrid the runtime injects `FLWR_RUNTIME_BASE_URL` and `FLWR_RUNTIME_API_KEY`, so only the model name is needed: set `AGENT_MODEL` (or `SPONSOR_MODEL`). For Endeavor, ask Flower staff for the exact model string first.
 - **Ask a mentor:** does the endpoint support the Responses API tool-calling loop this app uses? If not, that one call needs changing.
 - Ask for SuperGrid allow-listing using your registered Flower account username.
 

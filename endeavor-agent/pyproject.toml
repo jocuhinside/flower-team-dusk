@@ -1,0 +1,26 @@
+# Copyright 2026 Flower Labs GmbH. All Rights Reserved.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endeavor-agent"
+version = "0.2.2"
+description = "Chat with Flower Endeavor"
+dependencies = [
+    "flwr>=1.37.0,<2.0",
+    "openai>=2.16.0,<3.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["endeavor_agent"]
+
+[tool.flwr.app]
+publisher = "flwrlabs"
+display-name = "Endeavor Agent"
+color = "emerald"
+flwr-version-target = "1.37.0"
+fab-include = ["endeavor_agent/**/*.py"]
+
+[tool.flwr.app.components]
+agentapp = "endeavor_agent.agent_app:app"

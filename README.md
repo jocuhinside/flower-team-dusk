@@ -94,6 +94,18 @@ More: `docs/DEMO_SCRIPT.md`, `docs/SUBMISSION.md`, `docs/TEAM_GIT.md`, `HANDOFF.
   invoice or an agent's recommendation was correct.
 - Approver names are self-typed; policy limits and vendor lists are demo values.
 
+## Model choice and Endeavor
+
+Set `AGENT_MODEL` to any model the endpoint serves. Flower's Endeavor 1.0 model
+is supported by configuration only (set `AGENT_MODEL` to its model string); it is
+not claimed in any demo until a live run on SuperGrid has confirmed it works with
+this app's tool-calling loop.
+
+## Team
+
+Team Dusk, Flower Collaborative Agent Hackathon, Stanford, 29 Sep 2026: Louys
+Henderson (SenseBeen Technologies), Flavia Sparacino, Sid Senthilkumar.
+
 ## License
 
 Apache-2.0. See `LICENSE`.

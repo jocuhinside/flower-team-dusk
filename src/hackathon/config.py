@@ -27,6 +27,9 @@ RUNTIME_URL_VAR = "FLWR_RUNTIME_BASE_URL"
 KEY_VARS = ("SPONSOR_API_KEY", "FLWR_MODEL_API_KEY")
 URL_VARS = ("SPONSOR_BASE_URL", "FLWR_MODEL_API_ENDPOINT")
 MODEL_VARS = ("AGENT_MODEL", "SPONSOR_MODEL")
+# Used when no model variable is set, e.g. inside a SuperGrid run where .env does not exist.
+# Override with AGENT_MODEL. Swap for "flwrlabs/endeavor-1.0" once a run confirms Endeavor access.
+DEFAULT_MODEL = "dedicated/flowerai/Kimi-K2.7-Code-1OUHWL"
 
 
 class ConfigurationError(RuntimeError):
@@ -50,7 +53,7 @@ class SponsorConfig:
 
     @classmethod
     def from_environment(cls) -> SponsorConfig:
-        model = _first(MODEL_VARS)
+        model = _first(MODEL_VARS) or DEFAULT_MODEL
         runtime_key = os.environ.get(RUNTIME_KEY_VAR, "").strip()
         runtime_url = os.environ.get(RUNTIME_URL_VAR, "").strip()
         if runtime_key and runtime_url:
