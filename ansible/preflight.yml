@@ -1,0 +1,42 @@
+---
+# READ-ONLY baseline for the Debian regtest host. Changes nothing. Run this first:
+#   ansible-playbook -i ansible/inventory.ini ansible/preflight.yml
+# Set expected_hostname / expected_user in your local (gitignored) inventory.ini,
+# e.g.  myhost ansible_host=<ip> ansible_user=<user> expected_hostname=myhost expected_user=<user>
+- name: Read-only preflight for the Debian regtest host
+  hosts: debian_regtest
+  gather_facts: true
+  tasks:
+    - name: Confirm identity matches the expected baseline
+      ansible.builtin.assert:
+        that:
+          - expected_hostname is defined and ansible_hostname == expected_hostname
+          - ansible_distribution == "Debian"
+          - ansible_architecture == "x86_64"
+          - expected_user is defined and ansible_user_id == expected_user
+        fail_msg: "Host does not match the expected baseline (hostname / Debian / x86_64 / user). Set expected_hostname and expected_user in inventory.ini."
+        success_msg: "Identity matches: {{ ansible_hostname }}, Debian {{ ansible_distribution_version }}, x86_64."
+
+    - name: Collect read-only state
+      ansible.builtin.shell: |
+        echo "--- tailscale"; tailscale status 2>&1 | head -5
+        echo "--- default route"; ip route | head -3
+        echo "--- disk"; df -h / | tail -1
+        echo "--- memory"; free -h | sed -n 2p
+        echo "--- load"; uptime
+        echo "--- ssh"; systemctl is-active ssh
+        echo "--- tailscaled"; systemctl is-active tailscaled
+        echo "--- listening (first 15)"; ss -lnt | head -15
+        echo "--- bitcoin binaries"; command -v bitcoind bitcoin-cli || echo "NOT INSTALLED"
+        echo "--- existing bitcoin processes"; pgrep -a bitcoind || echo "none running"
+      register: state
+      changed_when: false
+
+    - name: Show baseline
+      ansible.builtin.debug:
+        msg: "{{ state.stdout_lines }}"
+
+    - name: Warn if a bitcoind is already running (regtest uses its own datadir and port)
+      ansible.builtin.debug:
+        msg: "A bitcoind process exists. regtest.yml uses a separate datadir and port 18443, but check it is not using that port."
+      when: "'none running' not in state.stdout"

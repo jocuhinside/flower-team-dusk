@@ -12,3 +12,11 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 *.fab
+
+# Signing keys and generated demo bundles
+keys/
+demo/
+Claude outputs/
+accountability-runs/
+rpc-credentials.env
+ansible/inventory.ini

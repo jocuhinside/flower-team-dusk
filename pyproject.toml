@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "Human-approved collaborative-agent transaction review on Flower"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = "MIT"
+license = { file = "LICENSE" }
 dependencies = [
+    "cryptography>=45.0.0,<47.0.0",
     "flwr>=1.39.0,<2.0",
     "openai>=2.16.0,<3.0.0",
     "pydantic>=2.12.0,<3.0.0",
@@ -26,7 +27,8 @@ requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.flwr.app]
-publisher = "neuvos"
+publisher = "sensebeen"
+fab-format-version = 1
 flwr-version-target = "1.39.0"
 
 [tool.flwr.app.components]

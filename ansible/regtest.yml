@@ -1,0 +1,85 @@
+---
+# Deploy a private Bitcoin Core REGTEST node for the accountability demo.
+#   ansible-playbook -i ansible/inventory.ini ansible/regtest.yml
+# Stop it:   ansible-playbook -i ansible/inventory.ini ansible/regtest.yml -e regtest_state=stopped
+#
+# Safety: separate data dir and RPC port, RPC bound to 127.0.0.1 only, credentials
+# generated once on the host (mode 0600) and never printed. Never touches mainnet data.
+- name: Private Bitcoin Core regtest node for the accountability demo
+  hosts: debian_regtest
+  gather_facts: true
+  vars:
+    regtest_state: started
+    regtest_dir: "{{ ansible_env.HOME }}/regtest-anchor"
+    regtest_rpcport: 18443
+    scripts_dir: "{{ ansible_env.HOME }}/hackathon-regtest"
+
+  tasks:
+    - name: Require a Debian-family host
+      ansible.builtin.assert:
+        that: ansible_os_family == "Debian"
+        fail_msg: "This playbook targets Debian hosts."
+
+    - name: Locate bitcoind and bitcoin-cli (must already be installed)
+      ansible.builtin.shell: command -v bitcoind && command -v bitcoin-cli
+      register: bitcoin_bins
+      changed_when: false
+      failed_when: bitcoin_bins.rc != 0
+
+    - name: Create the regtest data directory
+      ansible.builtin.file:
+        path: "{{ regtest_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create the scripts directory
+      ansible.builtin.file:
+        path: "{{ scripts_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install start/stop scripts
+      ansible.builtin.copy:
+        src: "../scripts/{{ item }}"
+        dest: "{{ scripts_dir }}/{{ item }}"
+        mode: "0755"
+      loop: [regtest_up.sh, regtest_down.sh]
+
+    - name: Start the regtest node and create credentials if missing
+      ansible.builtin.command: "{{ scripts_dir }}/regtest_up.sh"
+      environment:
+        REGTEST_DATADIR: "{{ regtest_dir }}"
+        REGTEST_RPCPORT: "{{ regtest_rpcport }}"
+      register: up
+      changed_when: "'already running' not in up.stdout"
+      no_log: true
+      when: regtest_state == "started"
+
+    - name: Confirm the node reports the regtest chain
+      ansible.builtin.shell: |
+        set -e
+        . "{{ regtest_dir }}/rpc-credentials.env"
+        bitcoin-cli -regtest -datadir="{{ regtest_dir }}" -rpcport="{{ regtest_rpcport }}" \
+          -rpcuser="$BITCOIN_RPC_USER" -rpcpassword="$BITCOIN_RPC_PASSWORD" getblockchaininfo \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["chain"])'
+      register: chain
+      changed_when: false
+      no_log: true
+      failed_when: chain.stdout.strip() != "regtest"
+      when: regtest_state == "started"
+
+    - name: Stop the regtest node (data is kept)
+      ansible.builtin.command: "{{ scripts_dir }}/regtest_down.sh"
+      environment:
+        REGTEST_DATADIR: "{{ regtest_dir }}"
+        REGTEST_RPCPORT: "{{ regtest_rpcport }}"
+      no_log: true
+      failed_when: false
+      when: regtest_state == "stopped"
+
+    - name: Next steps
+      ansible.builtin.debug:
+        msg:
+          - "Regtest node is {{ regtest_state }} on {{ inventory_hostname }} (RPC on 127.0.0.1:{{ regtest_rpcport }} only)."
+          - "On that host: source {{ regtest_dir }}/rpc-credentials.env && uv run hackathon chain-demo --ledger bitcoin"
+          - "From another machine, tunnel the port: ssh -L {{ regtest_rpcport }}:127.0.0.1:{{ regtest_rpcport }} <host>, then export BITCOIN_RPC_USER/PASSWORD from that file."
