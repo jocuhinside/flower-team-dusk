@@ -22,14 +22,6 @@ from .ledger import SimulatedLedger, ledger_from_environment
 
 app = AgentApp()
 
-# The orchestrator runs on the SuperLink (Flower's side), where the model provider is
-# Flower, so the Nebius Kimi ID is rejected there ("Error code: 50033"). Use a
-# Flower-served model for the orchestrator; specialists on our SuperNodes keep the
-# SuperNode's provider (Nebius Kimi via compose.yaml). On 29 Sep, openai/gpt-5.6-sol got
-# past the first call; flwrlabs/endeavor-1.0 returned "Flower Endeavor providers failed";
-# openai/gpt-5-nano timed out. "none" = fixed delegation, no model on the SuperLink side.
-ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", "").strip() or "none"
-
 
 def _ledger():
     if os.environ.get("BITCOIN_RPC_USER") and os.environ.get("BITCOIN_RPC_PASSWORD"):
@@ -37,27 +29,59 @@ def _ledger():
     return SimulatedLedger()
 
 
+def _summary(result: dict) -> str:
+    """Plain-text outcome built from the signed result, for when no model can summarize."""
+    audit_line = (result.get("audit") or "").strip().splitlines()[-1:] or [""]
+    return (
+        f"Status: {result['status']}. Run ID: {result['run_id']}. "
+        f"Ledger: {result['ledger']}. Audit: {audit_line[0]}. "
+        f"Orchestration: {result['orchestration_note']}.\n\n{result['report']}"
+    )
+
+
 @app.main()
 def main(agent: AgentSession, context: Context) -> None:
     del context
     config = SponsorConfig.from_environment()
-    # Fail fast instead of hanging until the 5-minute task timeout (SDK default is 600 s).
-    client = OpenAI(
-        api_key=config.api_key, base_url=config.base_url, max_retries=0, timeout=90.0
-    )
+    client = OpenAI(api_key=config.api_key, base_url=config.base_url, max_retries=0)
     tool_names = {tool["name"] for tool in agent.grid.tools()}
 
     if "push_messages" in tool_names:
         result = run_orchestrator(
             agent,
             client,
-            ORCHESTRATOR_MODEL,
+            config.model,
             ledger=_ledger(),
             out_dir=Path(os.environ.get("ACCOUNTABILITY_DIR", "accountability-runs")),
         )
         text = json.dumps(result, sort_keys=True)
+        if result.get("orchestration") == "scripted":
+            # The orchestrator's model endpoint just failed; don't spend another call on it.
+            agent.events.emit({"type": "response.output_text.done", "text": _summary(result)})
+            return
     else:
         label = os.environ.get("AGENT_LABEL", "specialist")
         text = run_specialist(agent, client, config.model, label=label)
 
+    if "push_messages" in tool_names:
+        # Same pattern as Flower's reference app: the visible answer is a streamed
+        # Responses call with no tools, and every event is forwarded to the chat.
+        # The full signed result stays in `text`; if streaming fails we fall back to it.
+        try:
+            stream = client.responses.create(
+                model=config.model,
+                instructions=(
+                    "You report the outcome of an accountable payment review. In under 120 "
+                    "words, state the status, run_id, ledger, audit line and the report's "
+                    "PAY or HOLD recommendation from the JSON below. Do not invent facts."
+                ),
+                input=text,
+                stream=True,
+                timeout=60,
+            )
+            for event in stream:
+                agent.events.emit(event.to_dict())
+            return
+        except Exception:  # noqa: BLE001 - best-effort presentation only
+            pass
     agent.events.emit({"type": "response.output_text.done", "text": text})

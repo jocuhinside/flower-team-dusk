@@ -28,8 +28,9 @@ KEY_VARS = ("SPONSOR_API_KEY", "FLWR_MODEL_API_KEY")
 URL_VARS = ("SPONSOR_BASE_URL", "FLWR_MODEL_API_ENDPOINT")
 MODEL_VARS = ("AGENT_MODEL", "SPONSOR_MODEL")
 # Used when no model variable is set, e.g. inside a SuperGrid run where .env does not exist.
-# Override with AGENT_MODEL. Swap for "flwrlabs/endeavor-1.0" once a run confirms Endeavor access.
-DEFAULT_MODEL = "dedicated/flowerai/Kimi-K2.7-Code-1OUHWL"
+# Override with AGENT_MODEL. Fallbacks if this stalls on SuperGrid: openai/gpt-5.6-terra, then
+# openai/gpt-5.6-sol. Not flwrlabs/endeavor-1.0: its providers returned 502 on SuperGrid.
+DEFAULT_MODEL = "openai/gpt-5.6-sol"
 
 
 class ConfigurationError(RuntimeError):
