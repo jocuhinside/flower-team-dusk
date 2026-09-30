@@ -54,6 +54,25 @@ is read from the variables above; the application never prints a secret value.
 Each SuperGrid task has a 5-minute timeout once running, so the chain must finish
 inside it. The offline smoke path should pass before attempting a live model call.
 
+Orchestration mode (`AGENT_ORCHESTRATION`, default `auto`):
+
+- `auto`: the orchestrator's model plans the delegation. If that model does not
+  answer its first call (25 s) or returns a provider error before anything was
+  delegated, a scripted orchestrator takes over: fixed invoice, vendor and budget
+  subtasks go to the SuperNodes, and one SuperNode acts as arbiter for PAY or HOLD.
+  Every model call then runs on the SuperNodes. The run's result and its
+  `RESULT_PRODUCED` event state that scripted delegation was used and why.
+- `scripted`: skip the orchestrator model entirely.
+- `model`: never fall back; a model failure fails the run.
+
+On SuperGrid the environment cannot be set per run, so runs use `auto`. When
+SuperGrid's model service is unresponsive, `auto` costs the 25 s first-call wait.
+
+Specialists that answer in plain text without calling `push_reply_message` still
+reply: the harness forwards the final text, and the reply's attestation records
+`delivery: harness_fallback` (otherwise `model_tool_call`). Specialists retry
+transient provider errors twice; the orchestrator does not retry.
+
 Publishing to Flower Hub (public, cannot be removed once published): sign in as
 the account named in `publisher` in `pyproject.toml`, then
 `uv run flwr build`, `uv run flwr login supergrid`, `uv run flwr app publish .`.

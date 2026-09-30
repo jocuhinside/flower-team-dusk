@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from hackathon.auditor import audit_run
 from hackathon.events import load_log
 from hackathon.flower_agents import (
+    MODEL_CALL_TIMEOUT_S,
     NO_DECISION,
+    ORCHESTRATOR_FIRST_CALL_TIMEOUT_S,
     SpecialistGrid,
     model_tools,
     open_reply,
@@ -50,6 +52,7 @@ class ScriptedClient:
 
     def create(self, **kwargs):
         self.seen_tools.append(kwargs["tools"])
+        self.seen_timeouts = [*getattr(self, "seen_timeouts", []), kwargs.get("timeout")]
         output, text = self.turns.pop(0)
         return SimpleNamespace(output=output, output_text=text)
 
@@ -276,3 +279,28 @@ def test_scripted_decision_needs_pay_or_hold_as_a_word(tmp_path: Path) -> None:
     result = run_orchestrator(session, DownClient(), "m", SimulatedLedger(), tmp_path, clock())
     assert result["status"] == "FINALIZED"  # the reply verified; only the wording was rejected
     assert result["report"].endswith(f"Recommendation: {NO_DECISION}")
+
+
+def test_first_orchestrator_call_has_a_short_timeout(tmp_path: Path) -> None:
+    _, client, _ = run(tmp_path)
+    assert client.seen_timeouts[0] == ORCHESTRATOR_FIRST_CALL_TIMEOUT_S
+    assert set(client.seen_timeouts[1:]) == {MODEL_CALL_TIMEOUT_S}
+
+
+def test_scripted_by_configuration_skips_the_model(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_ORCHESTRATION", "scripted")
+    session = SimpleNamespace(prompt="Review invoice", grid=ArbiterGrid())
+    client = ScriptedClient([])  # any model call would fail on an empty script
+    result = run_orchestrator(session, client, "m", SimulatedLedger(), tmp_path, clock())
+    assert result["orchestration"] == "scripted" and result["status"] == "FINALIZED"
+    assert result["orchestration_note"] == "scripted delegation (AGENT_ORCHESTRATION=scripted)"
+
+
+def test_model_mode_does_not_fall_back(tmp_path, monkeypatch) -> None:
+    import openai
+    import pytest
+
+    monkeypatch.setenv("AGENT_ORCHESTRATION", "model")
+    session = SimpleNamespace(prompt="Review invoice", grid=ArbiterGrid())
+    with pytest.raises(openai.APITimeoutError):
+        run_orchestrator(session, DownClient(), "m", SimulatedLedger(), tmp_path, clock())

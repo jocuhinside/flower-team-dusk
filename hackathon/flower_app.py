@@ -61,7 +61,9 @@ def main(agent: AgentSession, context: Context) -> None:
             return
     else:
         label = os.environ.get("AGENT_LABEL", "specialist")
-        text = run_specialist(agent, client, config.model, label=label)
+        # Specialists retry transient provider errors (e.g. a dropped connection to the model
+        # endpoint); the orchestrator does not, so an unreachable endpoint falls back quickly.
+        text = run_specialist(agent, client.with_options(max_retries=2), config.model, label=label)
 
     if "push_messages" in tool_names:
         # Same pattern as Flower's reference app: the visible answer is a streamed

@@ -16,6 +16,7 @@ events are therefore NOT signed by the specialist; per-agent keys are a later st
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -49,6 +50,12 @@ ORCHESTRATOR_INSTRUCTIONS = (
 ORCHESTRATOR_MAX_TURNS = 4
 MAX_OUTPUT_TOKENS = 1500
 MODEL_CALL_TIMEOUT_S = 60
+# A working model answers the first orchestrator call in well under this; SuperGrid's
+# service, when down, never answers, so the scripted fallback starts sooner.
+ORCHESTRATOR_FIRST_CALL_TIMEOUT_S = 25
+# auto: model, falling back to scripted if the model is unreachable before delegating.
+# model: never fall back. scripted: skip the orchestrator model entirely.
+ORCHESTRATION_VAR = "AGENT_ORCHESTRATION"
 
 # Scripted orchestration: used when the orchestrator's own model endpoint is unreachable.
 # Every model call then happens on the SuperNodes; the orchestrator only routes messages.
@@ -271,6 +278,7 @@ def run_model_loop(
     prompt: str,
     grid: Any,
     max_turns: int = 8,
+    first_call_timeout: float = MODEL_CALL_TIMEOUT_S,
 ) -> str:
     """Responses-API tool loop. Every function_call goes through ``grid.call``."""
     items: list[Any] = [{"role": "user", "content": prompt}]
@@ -292,7 +300,8 @@ def run_model_loop(
                 tools=turn_tools,
                 reasoning={"effort": "low"},
                 max_output_tokens=MAX_OUTPUT_TOKENS,
-                timeout=MODEL_CALL_TIMEOUT_S,  # a stuck call fails fast instead of hanging
+                # a stuck call fails fast instead of hanging
+                timeout=first_call_timeout if turn == 0 else MODEL_CALL_TIMEOUT_S,
             )
         except Exception as exc:
             _trace(f"turn={turn} rejected: {type(exc).__name__}: {exc}")
@@ -413,15 +422,22 @@ def run_orchestrator(
     grid = OrchestratorGrid(session.grid, recorder)
     grid._started_event_id = started.event_id
 
+    mode = os.environ.get(ORCHESTRATION_VAR, "auto").strip().lower()
     orchestration, note = "model", ""
     try:
-        report = run_model_loop(
-            client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
-            max_turns=ORCHESTRATOR_MAX_TURNS,
-        )
+        if mode == "scripted":
+            orchestration = "scripted"
+            note = f"scripted delegation ({ORCHESTRATION_VAR}=scripted)"
+            report = run_scripted_delegation(grid, session.prompt)
+        else:
+            report = run_model_loop(
+                client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
+                max_turns=ORCHESTRATOR_MAX_TURNS,
+                first_call_timeout=ORCHESTRATOR_FIRST_CALL_TIMEOUT_S,
+            )
     except openai.APIError as error:
-        if grid._delegations:
-            raise  # work is already out; re-delegating would double it
+        if mode == "model" or grid._delegations:
+            raise  # model-only mode, or work is already out and re-delegating would double it
         orchestration = "scripted"
         note = f"orchestrator model unavailable ({type(error).__name__}); scripted delegation"
         _trace(note)
