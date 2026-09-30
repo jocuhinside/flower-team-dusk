@@ -16,7 +16,6 @@ events are therefore NOT signed by the specialist; per-agent keys are a later st
 from __future__ import annotations
 
 import json
-import re
 import sys
 import time
 import uuid
@@ -25,8 +24,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import openai
 
 from .auditor import AuditFailedError, audit_run, finalize_run
 from .events import EventType, Recorder, digest_payload, save_log
@@ -45,28 +42,6 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "a PAY or HOLD recommendation. Never execute or authorize any payment; two board members "
     "must approve the exact SHA-256 of the final review before anything is finalized."
 )
-# Budget for one SuperGrid task (5-minute limit): get_nodes, push, pull, final answer.
-ORCHESTRATOR_MAX_TURNS = 4
-MAX_OUTPUT_TOKENS = 1500
-MODEL_CALL_TIMEOUT_S = 60
-
-# Scripted orchestration: used when the orchestrator's own model endpoint is unreachable.
-# Every model call then happens on the SuperNodes; the orchestrator only routes messages.
-SCRIPTED_SUBTASKS = (
-    ("invoice", "Extract the payee, amount, purpose and due date from this invoice request."),
-    ("vendor", "Check whether the payee is stated to be on the approved vendor list and note "
-               "any conflict-of-interest or missing-information concerns."),
-    ("budget", "Check the amount against the stated budget line and reserve rules; say whether "
-               "funds are sufficient."),
-)
-SCRIPTED_WAIT_S = 120
-ARBITER_WAIT_S = 60
-NO_DECISION = "HOLD (no PAY or HOLD decision from the arbiter)"
-
-FINAL_TURN_NOTE = (
-    " Tool use has ended. Answer now using only the results you already have, and say "
-    "which results are missing."
-)
 SPECIALIST_INSTRUCTIONS = (
     "You are a specialist agent on a SuperNode. Do only the task in the instruction you were "
     "given, using only information you legitimately have. Reply exactly once with "
@@ -77,25 +52,14 @@ SPECIALIST_INSTRUCTIONS = (
 # ---------- specialist reply attestation ----------
 
 
-def wrap_reply(
-    body: str,
-    instruction: str,
-    label: str,
-    now: datetime | None = None,
-    delivery: str = "model_tool_call",
-) -> str:
-    """Attach hash-only attestation to a specialist's reply.
-
-    ``delivery`` records who sent it: the model via ``push_reply_message``, or the
-    harness forwarding the model's final text because the model never called the tool.
-    """
+def wrap_reply(body: str, instruction: str, label: str, now: datetime | None = None) -> str:
+    """Attach hash-only attestation to a specialist's reply."""
     return json.dumps(
         {
             ENVELOPE_KEY: "1",
             "body": body,
             "attestation": {
                 "agent_label": label,
-                "delivery": delivery,
                 "input_hash": digest_payload(instruction),
                 "output_hash": digest_payload(body),
                 "timestamp_utc": (now or datetime.now(UTC)).isoformat(),
@@ -132,7 +96,6 @@ class SpecialistGrid:
     def __init__(self, grid: Any, instruction: str, label: str, clock=None) -> None:
         self._grid, self._instruction, self._label = grid, instruction, label
         self._clock = clock or (lambda: datetime.now(UTC))
-        self.replied = False
 
     def tools(self) -> list[dict[str, Any]]:
         return self._grid.tools()
@@ -142,23 +105,10 @@ class SpecialistGrid:
             return self._grid.call(tool_call)
         arguments = tool_call["arguments"]
         arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
-        tool_call = dict(tool_call)
-        delivery = tool_call.pop("delivery", "model_tool_call")  # local marker, never sent
         arguments["payload"] = wrap_reply(
-            arguments["payload"], self._instruction, self._label, self._clock(), delivery
+            arguments["payload"], self._instruction, self._label, self._clock()
         )
-        self.replied = True
         return self._grid.call({**tool_call, "arguments": json.dumps(arguments)})
-
-    def reply_with_text(self, text: str) -> None:
-        """Send the model's final text when it answered without calling push_reply_message."""
-        _trace(f"specialist {self._label}: no push_reply_message call; forwarding final text")
-        self.call({
-            "name": "push_reply_message",
-            "arguments": json.dumps({"payload": text}),
-            "call_id": "sb-harness-fallback",
-            "delivery": "harness_fallback",
-        })
 
 
 @dataclass
@@ -244,24 +194,14 @@ class OrchestratorGrid:
 # ---------- model loop ----------
 
 
+def _trace(message: str) -> None:
+    """One line per model turn in the run log (no prompts, keys or outputs)."""
+    print(f"dusk_trace: {message}", file=sys.stderr, flush=True)
+
+
 def model_tools(grid_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop Flower's extra ``output_schema`` key, which is not part of the OpenAI tool schema."""
     return [{k: v for k, v in tool.items() if k != "output_schema"} for tool in grid_tools]
-
-
-def _trace(message: str) -> None:
-    """Diagnostic line for the run log. Shapes and names only, never keys or payload text."""
-    print(f"sb_trace: {message}", file=sys.stderr, flush=True)
-
-
-def _item_shapes(items: list[Any]) -> list[str]:
-    """Summarize Responses items as ``type[keys]`` so rejected requests can be diagnosed."""
-    shapes = []
-    for item in items:
-        data = item if isinstance(item, dict) else item.model_dump(exclude_none=True)
-        kind = data.get("type") or data.get("role", "?")
-        shapes.append(f"{kind}[{','.join(sorted(data))}]")
-    return shapes
 
 
 def run_model_loop(
@@ -277,28 +217,20 @@ def run_model_loop(
     tools = model_tools(grid.tools())
     text = ""
     for turn in range(max_turns):
-        # The last turn offers no tools, so the model has to answer with what it has.
-        last = turn == max_turns - 1
-        turn_tools = [] if last else tools
-        turn_instructions = instructions + (FINAL_TURN_NOTE if last else "")
-        sent = _item_shapes(items)
-        names = [t.get("name") for t in turn_tools]
-        _trace(f"turn={turn} model={model} tools={names} input={sent}")
+        _trace(f"turn={turn} model={model} tools={[t.get('name') for t in tools]}")
+        started = time.monotonic()
         try:
             response = client.responses.create(
-                model=model,
-                instructions=turn_instructions,
-                input=items,
-                tools=turn_tools,
-                reasoning={"effort": "low"},
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                timeout=MODEL_CALL_TIMEOUT_S,  # a stuck call fails fast instead of hanging
+                model=model, instructions=instructions, input=items, tools=tools
             )
         except Exception as exc:
-            _trace(f"turn={turn} rejected: {type(exc).__name__}: {exc}")
+            _trace(f"turn={turn} rejected after {time.monotonic() - started:.1f}s: {exc!r}")
             raise
-        _trace(f"turn={turn} output={_item_shapes(response.output)}")
         calls = [item for item in response.output if item.type == "function_call"]
+        _trace(
+            f"turn={turn} ok after {time.monotonic() - started:.1f}s "
+            f"calls={[c.name for c in calls]}"
+        )
         text = getattr(response, "output_text", "") or text
         if not calls:
             return text
@@ -310,85 +242,62 @@ def run_model_loop(
     return text or "Stopped: turn limit reached before a final answer."
 
 
+SUBTASKS = (
+    "Extract the payee, amount and purpose from this invoice request",
+    "Check the payee against the approved vendor list and any board-member links for",
+    "Check the budget line and the reserve floor rules for",
+)
+
+
+def run_fixed_delegation(prompt: str, grid: Any, wait_seconds: float = 150.0) -> str:
+    """Delegate without an orchestrator model: one fixed subtask per SuperNode.
+
+    Used when the SuperLink-side model service is unavailable. Every call still goes
+    through ``grid.call``, so delegations and replies are recorded and audited.
+    """
+
+    def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        _trace(f"fixed {name}")
+        item = grid.call({"name": name, "arguments": json.dumps(arguments), "call_id": name})
+        return json.loads(item["output"])
+
+    nodes = call("get_nodes", {"sample_size": None})["nodes"]
+    _trace(f"fixed nodes={len(nodes)}")
+    if not nodes:
+        return "HOLD: no SuperNodes available."
+    messages = [
+        {
+            "dst_node_id": node["id"],
+            "payload": f"{SUBTASKS[i % len(SUBTASKS)]}: {prompt}",
+            "reply_to_message_id": None,
+        }
+        for i, node in enumerate(nodes[: len(SUBTASKS)])
+    ]
+    results = call("push_messages", {"messages": messages})["results"]
+    ids = [r["message_id"] for r in results if r.get("message_id")]
+    _trace(f"fixed pushed={len(ids)} errors={[r.get('error') for r in results if r.get('error')]}")
+    if not ids:
+        return "HOLD: no subtask was accepted."
+    replies = call("pull_messages", {"message_ids": ids, "timeout": wait_seconds})["messages"]
+    _trace(f"fixed replies={len(replies)}/{len(ids)}")
+    lines = [
+        f"- SuperNode {r['src_node_id']}: {r.get('payload') or r.get('error')}" for r in replies
+    ]
+    missing = len(ids) - len(replies)
+    verdict = "HOLD" if missing or any(r.get("error") for r in replies) else "REVIEW"
+    tail = f" ({missing} subtask(s) without a reply)" if missing else ""
+    return "\n".join(
+        [f"{verdict}: fixed delegation to {len(ids)} SuperNodes{tail}.", *lines,
+         "Two board members must approve the exact SHA-256 of this review."]
+    )
+
+
 # ---------- roles ----------
 
 
 def run_specialist(session: Any, client: Any, model: str, label: str = "specialist") -> str:
     grid = SpecialistGrid(session.grid, session.prompt, label)
-    text = run_model_loop(client, model, SPECIALIST_INSTRUCTIONS, session.prompt, grid)
-    if not grid.replied and text:
-        grid.reply_with_text(text)
-    return text
-
-
-def _message_ids(output_item: dict[str, Any]) -> list[str]:
-    results = json.loads(output_item["output"])["results"]
-    return [r["message_id"] for r in results if r.get("message_id")]
-
-
-def _collect(grid: OrchestratorGrid, ids: list[str], wait_s: float) -> dict[str, str | None]:
-    """Pull until every id has a reply or the wait runs out. Returns reply bodies by id."""
-    bodies: dict[str, str | None] = {}
-    pending, deadline = list(ids), time.monotonic() + wait_s
-    while pending:
-        remaining = max(0.0, deadline - time.monotonic())
-        output = json.loads(grid.call({
-            "name": "pull_messages",
-            "arguments": json.dumps({"message_ids": pending, "timeout": min(30.0, remaining)}),
-            "call_id": f"sb-scripted-pull-{uuid.uuid4().hex[:8]}",
-        })["output"])
-        for reply in output["messages"]:
-            bodies[reply["reply_to_message_id"]] = reply.get("payload")
-        pending = [i for i in pending if i not in bodies]
-        if remaining <= 0:
-            break
-    return bodies
-
-
-def run_scripted_delegation(grid: OrchestratorGrid, prompt: str) -> str:
-    """Delegate fixed subtasks, then ask one SuperNode to arbitrate PAY or HOLD."""
-    nodes_out = json.loads(grid.call({
-        "name": "get_nodes", "arguments": json.dumps({"sample_size": None}),
-        "call_id": "sb-scripted-nodes",
-    })["output"])
-    nodes = [str(n["id"]) for n in nodes_out.get("nodes", [])]
-    if not nodes:
-        return f"No SuperNodes available.\nRecommendation: {NO_DECISION}"
-
-    messages = [
-        {"dst_node_id": nodes[i % len(nodes)], "payload": f"{task}\n\nRequest: {prompt}",
-         "reply_to_message_id": None}
-        for i, (_, task) in enumerate(SCRIPTED_SUBTASKS)
-    ]
-    ids = _message_ids(grid.call({
-        "name": "push_messages", "arguments": json.dumps({"messages": messages}),
-        "call_id": "sb-scripted-push",
-    }))
-    bodies = _collect(grid, ids, SCRIPTED_WAIT_S)
-    findings = [
-        f"- {label}: {bodies.get(msg_id) or 'no reply'}"
-        for (label, _), msg_id in zip(SCRIPTED_SUBTASKS, ids, strict=False)
-    ]
-
-    arbiter_task = (
-        "You are the arbiter for an HOA payment review. Based only on the findings below, "
-        "answer with PAY or HOLD followed by a one-sentence reason. Never authorize payment; "
-        f"two board members approve separately.\n\nRequest: {prompt}\n\nFindings:\n"
-        + "\n".join(findings)
-    )
-    arbiter_ids = _message_ids(grid.call({
-        "name": "push_messages",
-        "arguments": json.dumps({"messages": [
-            {"dst_node_id": nodes[0], "payload": arbiter_task, "reply_to_message_id": None}
-        ]}),
-        "call_id": "sb-scripted-arbiter",
-    }))
-    decision = None
-    if arbiter_ids:
-        decision = _collect(grid, arbiter_ids, ARBITER_WAIT_S).get(arbiter_ids[0])
-    if not decision or not re.search(r"\b(PAY|HOLD)\b", decision):
-        decision = NO_DECISION
-    return "Findings:\n" + "\n".join(findings) + f"\nRecommendation: {decision.strip()}"
+    return run_model_loop(client, model, SPECIALIST_INSTRUCTIONS, session.prompt, grid)
 
 
 def run_orchestrator(
@@ -410,22 +319,12 @@ def run_orchestrator(
     grid = OrchestratorGrid(session.grid, recorder)
     grid._started_event_id = started.event_id
 
-    orchestration, note = "model", ""
-    try:
-        report = run_model_loop(
-            client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
-            max_turns=ORCHESTRATOR_MAX_TURNS,
-        )
-    except openai.APIError as error:
-        if grid._delegations:
-            raise  # work is already out; re-delegating would double it
-        orchestration = "scripted"
-        note = f"orchestrator model unavailable ({type(error).__name__}); scripted delegation"
-        _trace(note)
-        report = run_scripted_delegation(grid, session.prompt)
-    summary = "Combined specialist results" + (f" ({note})" if note else "")
+    if model == "none":
+        report = run_fixed_delegation(session.prompt, grid)
+    else:
+        report = run_model_loop(client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid)
     recorder.emit(
-        ORCHESTRATOR, ORCHESTRATOR, EventType.RESULT_PRODUCED, summary,
+        ORCHESTRATOR, ORCHESTRATOR, EventType.RESULT_PRODUCED, "Combined specialist results",
         output_payload=report,
     )
     ledger.mine_demo_block()
@@ -467,6 +366,4 @@ def run_orchestrator(
             for e in recorder.events
         ],
         "report": report,
-        "orchestration": orchestration,
-        "orchestration_note": note,
     }
