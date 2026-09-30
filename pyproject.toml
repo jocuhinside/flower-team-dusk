@@ -26,11 +26,6 @@ dev = [
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
-[tool.uv.build-backend]
-# Flat layout: SuperGrid imports `hackathon` from the app root; a src/ layout fails
-# there with ModuleNotFoundError (exit 607).
-module-root = ""
-
 [tool.flwr.app]
 publisher = "sensebeen"
 fab-format-version = 1
@@ -49,3 +44,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv.build-backend]
+# Package lives at the repo root so the Flower runtime can import it from the FAB root.
+module-root = ""
