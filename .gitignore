@@ -23,9 +23,4 @@ accountability-runs/
 rpc-credentials.env
 ansible/inventory.ini
 data/
-
-# Local Claude Code settings (kept out of FABs and Hub uploads)
-.claude/
-
-# Separate Flower app; keep it out of this app's FAB.
-endeavor-agent/
+demo-rehearsal-*.md
