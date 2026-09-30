@@ -352,6 +352,7 @@ def run_scripted_delegation(grid: OrchestratorGrid, prompt: str) -> str:
         "call_id": "sb-scripted-nodes",
     })["output"])
     nodes = [str(n["id"]) for n in nodes_out.get("nodes", [])]
+    _trace(f"scripted nodes={nodes}")
     if not nodes:
         return f"No SuperNodes available.\nRecommendation: {NO_DECISION}"
 
@@ -364,7 +365,9 @@ def run_scripted_delegation(grid: OrchestratorGrid, prompt: str) -> str:
         "name": "push_messages", "arguments": json.dumps({"messages": messages}),
         "call_id": "sb-scripted-push",
     }))
+    _trace(f"scripted pushed={len(ids)}/{len(messages)}")
     bodies = _collect(grid, ids, SCRIPTED_WAIT_S)
+    _trace(f"scripted replies={sum(1 for i in ids if bodies.get(i))}/{len(ids)}")
     findings = [
         f"- {label}: {bodies.get(msg_id) or 'no reply'}"
         for (label, _), msg_id in zip(SCRIPTED_SUBTASKS, ids, strict=False)
