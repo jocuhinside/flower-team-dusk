@@ -28,7 +28,7 @@ uv run ruff check . && uv run pytest -q
 git add -p && git commit -m "..."
 git push -u origin <name>/<topic>      # open a PR into main
 ```
-Suggested ownership to avoid conflicts: Flavia owns `src/hackathon/flower_app.py` and `flower_agents.py`; the trust layer (`schemas.py`, `bundle.py`, `signing.py`, `events.py`, `auditor.py`, `ledger.py`, `ui.py`) and `ansible/`, `scripts/` are Louys's. Tell each other before editing across those lines. `schemas.py` and `roles.py` are shared contracts; change them by PR only.
+Suggested ownership to avoid conflicts: Flavia owns `hackathon/flower_app.py` and `flower_agents.py`; the trust layer (`schemas.py`, `bundle.py`, `signing.py`, `events.py`, `auditor.py`, `ledger.py`, `ui.py`) and `ansible/`, `scripts/` are Louys's. Tell each other before editing across those lines. `schemas.py` and `roles.py` are shared contracts; change them by PR only.
 
 ## Never commit
 `.env`, anything in `keys/`, `rpc-credentials.env`, API keys, `*.fab` build files. If a secret is ever pushed, rotate it immediately; deleting the commit is not enough.

@@ -49,4 +49,25 @@ def main(agent: AgentSession, context: Context) -> None:
         label = os.environ.get("AGENT_LABEL", "specialist")
         text = run_specialist(agent, client, config.model, label=label)
 
+    if "push_messages" in tool_names:
+        # Same pattern as Flower's reference app: the visible answer is a streamed
+        # Responses call with no tools, and every event is forwarded to the chat.
+        # The full signed result stays in `text`; if streaming fails we fall back to it.
+        try:
+            stream = client.responses.create(
+                model=config.model,
+                instructions=(
+                    "You report the outcome of an accountable payment review. In under 120 "
+                    "words, state the status, run_id, ledger, audit line and the report's "
+                    "PAY or HOLD recommendation from the JSON below. Do not invent facts."
+                ),
+                input=text,
+                stream=True,
+                timeout=60,
+            )
+            for event in stream:
+                agent.events.emit(event.to_dict())
+            return
+        except Exception:  # noqa: BLE001 - best-effort presentation only
+            pass
     agent.events.emit({"type": "response.output_text.done", "text": text})

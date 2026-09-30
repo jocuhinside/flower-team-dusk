@@ -44,3 +44,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv.build-backend]
+# Package lives at the repo root so the Flower runtime can import it from the FAB root.
+module-root = ""

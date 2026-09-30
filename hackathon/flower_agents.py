@@ -16,6 +16,7 @@ events are therefore NOT signed by the specialist; per-agent keys are a later st
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -40,6 +41,15 @@ ORCHESTRATOR_INSTRUCTIONS = (
     "a PAY or HOLD recommendation. Never execute or authorize any payment; two board members "
     "must approve the exact SHA-256 of the final review before anything is finalized."
 )
+# Budget for one SuperGrid task (5-minute limit): get_nodes, push, pull, final answer.
+ORCHESTRATOR_MAX_TURNS = 4
+MAX_OUTPUT_TOKENS = 1500
+MODEL_CALL_TIMEOUT_S = 60
+
+FINAL_TURN_NOTE = (
+    " Tool use has ended. Answer now using only the results you already have, and say "
+    "which results are missing."
+)
 SPECIALIST_INSTRUCTIONS = (
     "You are a specialist agent on a SuperNode. Do only the task in the instruction you were "
     "given, using only information you legitimately have. Reply exactly once with "
@@ -50,14 +60,25 @@ SPECIALIST_INSTRUCTIONS = (
 # ---------- specialist reply attestation ----------
 
 
-def wrap_reply(body: str, instruction: str, label: str, now: datetime | None = None) -> str:
-    """Attach hash-only attestation to a specialist's reply."""
+def wrap_reply(
+    body: str,
+    instruction: str,
+    label: str,
+    now: datetime | None = None,
+    delivery: str = "model_tool_call",
+) -> str:
+    """Attach hash-only attestation to a specialist's reply.
+
+    ``delivery`` records who sent it: the model via ``push_reply_message``, or the
+    harness forwarding the model's final text because the model never called the tool.
+    """
     return json.dumps(
         {
             ENVELOPE_KEY: "1",
             "body": body,
             "attestation": {
                 "agent_label": label,
+                "delivery": delivery,
                 "input_hash": digest_payload(instruction),
                 "output_hash": digest_payload(body),
                 "timestamp_utc": (now or datetime.now(UTC)).isoformat(),
@@ -94,6 +115,7 @@ class SpecialistGrid:
     def __init__(self, grid: Any, instruction: str, label: str, clock=None) -> None:
         self._grid, self._instruction, self._label = grid, instruction, label
         self._clock = clock or (lambda: datetime.now(UTC))
+        self.replied = False
 
     def tools(self) -> list[dict[str, Any]]:
         return self._grid.tools()
@@ -103,10 +125,23 @@ class SpecialistGrid:
             return self._grid.call(tool_call)
         arguments = tool_call["arguments"]
         arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+        tool_call = dict(tool_call)
+        delivery = tool_call.pop("delivery", "model_tool_call")  # local marker, never sent
         arguments["payload"] = wrap_reply(
-            arguments["payload"], self._instruction, self._label, self._clock()
+            arguments["payload"], self._instruction, self._label, self._clock(), delivery
         )
+        self.replied = True
         return self._grid.call({**tool_call, "arguments": json.dumps(arguments)})
+
+    def reply_with_text(self, text: str) -> None:
+        """Send the model's final text when it answered without calling push_reply_message."""
+        _trace(f"specialist {self._label}: no push_reply_message call; forwarding final text")
+        self.call({
+            "name": "push_reply_message",
+            "arguments": json.dumps({"payload": text}),
+            "call_id": "sb-harness-fallback",
+            "delivery": "harness_fallback",
+        })
 
 
 @dataclass
@@ -197,6 +232,21 @@ def model_tools(grid_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: v for k, v in tool.items() if k != "output_schema"} for tool in grid_tools]
 
 
+def _trace(message: str) -> None:
+    """Diagnostic line for the run log. Shapes and names only, never keys or payload text."""
+    print(f"sb_trace: {message}", file=sys.stderr, flush=True)
+
+
+def _item_shapes(items: list[Any]) -> list[str]:
+    """Summarize Responses items as ``type[keys]`` so rejected requests can be diagnosed."""
+    shapes = []
+    for item in items:
+        data = item if isinstance(item, dict) else item.model_dump(exclude_none=True)
+        kind = data.get("type") or data.get("role", "?")
+        shapes.append(f"{kind}[{','.join(sorted(data))}]")
+    return shapes
+
+
 def run_model_loop(
     client: Any,
     model: str,
@@ -209,10 +259,28 @@ def run_model_loop(
     items: list[Any] = [{"role": "user", "content": prompt}]
     tools = model_tools(grid.tools())
     text = ""
-    for _ in range(max_turns):
-        response = client.responses.create(
-            model=model, instructions=instructions, input=items, tools=tools
-        )
+    for turn in range(max_turns):
+        # The last turn offers no tools, so the model has to answer with what it has.
+        last = turn == max_turns - 1
+        turn_tools = [] if last else tools
+        turn_instructions = instructions + (FINAL_TURN_NOTE if last else "")
+        sent = _item_shapes(items)
+        names = [t.get("name") for t in turn_tools]
+        _trace(f"turn={turn} model={model} tools={names} input={sent}")
+        try:
+            response = client.responses.create(
+                model=model,
+                instructions=turn_instructions,
+                input=items,
+                tools=turn_tools,
+                reasoning={"effort": "low"},
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+                timeout=MODEL_CALL_TIMEOUT_S,  # a stuck call fails fast instead of hanging
+            )
+        except Exception as exc:
+            _trace(f"turn={turn} rejected: {type(exc).__name__}: {exc}")
+            raise
+        _trace(f"turn={turn} output={_item_shapes(response.output)}")
         calls = [item for item in response.output if item.type == "function_call"]
         text = getattr(response, "output_text", "") or text
         if not calls:
@@ -230,7 +298,10 @@ def run_model_loop(
 
 def run_specialist(session: Any, client: Any, model: str, label: str = "specialist") -> str:
     grid = SpecialistGrid(session.grid, session.prompt, label)
-    return run_model_loop(client, model, SPECIALIST_INSTRUCTIONS, session.prompt, grid)
+    text = run_model_loop(client, model, SPECIALIST_INSTRUCTIONS, session.prompt, grid)
+    if not grid.replied and text:
+        grid.reply_with_text(text)
+    return text
 
 
 def run_orchestrator(
@@ -252,7 +323,10 @@ def run_orchestrator(
     grid = OrchestratorGrid(session.grid, recorder)
     grid._started_event_id = started.event_id
 
-    report = run_model_loop(client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid)
+    report = run_model_loop(
+        client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
+        max_turns=ORCHESTRATOR_MAX_TURNS,
+    )
     recorder.emit(
         ORCHESTRATOR, ORCHESTRATOR, EventType.RESULT_PRODUCED, "Combined specialist results",
         output_payload=report,

@@ -11,6 +11,7 @@ from hackathon.flower_agents import (
     SpecialistGrid,
     model_tools,
     open_reply,
+    run_model_loop,
     run_orchestrator,
     run_specialist,
     wrap_reply,
@@ -175,6 +176,40 @@ def test_specialist_reply_is_attested_before_leaving() -> None:
     sent = json.loads(json.loads(grid.calls[0]["arguments"])["payload"])
     body, attestation, problem = open_reply(json.dumps(sent))
     assert body == "policy ok" and problem == "" and attestation["agent_label"] == "safety"
+
+
+def test_specialist_text_answer_is_still_replied_once() -> None:
+    grid = FakeSpecialistGrid()
+    session = SimpleNamespace(prompt="Check vendor list", grid=grid)
+    client = ScriptedClient([([Item(type="message")], "vendor approved")])
+    run_specialist(session, client, "m", label="vendor")
+    assert [c["name"] for c in grid.calls] == ["push_reply_message"]
+    sent = json.loads(json.loads(grid.calls[0]["arguments"])["payload"])
+    body, attestation, problem = open_reply(json.dumps(sent))
+    assert body == "vendor approved" and problem == ""
+    assert attestation["delivery"] == "harness_fallback"
+    assert "delivery" not in grid.calls[0]
+
+
+def test_specialist_tool_reply_is_not_sent_twice() -> None:
+    grid = FakeSpecialistGrid()
+    session = SimpleNamespace(prompt="Check budget", grid=grid)
+    client = ScriptedClient([
+        ([call_item("push_reply_message", {"payload": "within budget"}, "c1")], ""),
+        ([Item(type="message")], "done"),
+    ])
+    run_specialist(session, client, "m", label="budget")
+    assert len(grid.calls) == 1
+    sent = json.loads(json.loads(grid.calls[0]["arguments"])["payload"])
+    assert sent["attestation"]["delivery"] == "model_tool_call"
+
+
+def test_last_turn_has_no_tools_so_the_model_must_answer() -> None:
+    grid = FakeSpecialistGrid()
+    turns = [([call_item("other", {}, f"c{i}")], "") for i in range(2)]
+    client = ScriptedClient([*turns, ([Item(type="message")], "final")])
+    assert run_model_loop(client, "m", "do it", "p", grid, max_turns=3) == "final"
+    assert client.seen_tools[0] and client.seen_tools[-1] == []
 
 
 def test_specialist_grid_passes_other_tools_through() -> None:

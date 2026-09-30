@@ -1,0 +1,64 @@
+# Self-hosted Flower deployment for the Team Dusk chain, on the sponsor's Kimi endpoint.
+# Use when SuperGrid's model service rejects the model (error 50033). Independent of
+# compose.yaml: its own project name, network and data dirs, so SuperGrid nodes keep running.
+#
+#   docker compose -f compose.local.yaml up -d
+#   FLWR_CHAT_SUPERLINK=local-dusk flwr chat   # federation @none/default, then /load .
+#
+# Reads SPONSOR_API_KEY and AGENT_MODEL from ./.env; nothing from .env is baked into the FAB.
+# Control/Runtime HTTP API is bound to 127.0.0.1 only and runs --insecure: local use only.
+name: dusk-local
+
+x-model-env: &model-env
+  FLWR_MODEL_API_KEY: ${SPONSOR_API_KEY:?set SPONSOR_API_KEY in .env}
+  FLWR_MODEL_API_ENDPOINT: https://api.tokenfactory.tf-ca1.nebius.com/v1/responses
+  AGENT_MODEL: ${AGENT_MODEL:?set AGENT_MODEL in .env}
+
+x-supernode: &supernode
+  image: flwr/supernode:1.39.0
+  restart: unless-stopped
+  depends_on: [superlink]
+
+services:
+  superlink:
+    image: flwr/superlink:1.39.0
+    restart: unless-stopped
+    command:
+      - --insecure
+      - --host=0.0.0.0
+      - --port=8000
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *model-env
+    ports:
+      - "127.0.0.1:39100:8000"
+
+  supernode-0:
+    <<: *supernode
+    command: [--insecure, --superlink=superlink:9092, --allow-runtime-dependency-installation]
+    environment:
+      <<: *model-env
+      AGENT_LABEL: invoice-reader
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-0
+    volumes:
+      - ./data/local/node-0:/data/node-0
+
+  supernode-1:
+    <<: *supernode
+    command: [--insecure, --superlink=superlink:9092, --allow-runtime-dependency-installation]
+    environment:
+      <<: *model-env
+      AGENT_LABEL: vendor-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-1
+    volumes:
+      - ./data/local/node-1:/data/node-1
+
+  supernode-2:
+    <<: *supernode
+    command: [--insecure, --superlink=superlink:9092, --allow-runtime-dependency-installation]
+    environment:
+      <<: *model-env
+      AGENT_LABEL: budget-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-2
+    volumes:
+      - ./data/local/node-2:/data/node-2

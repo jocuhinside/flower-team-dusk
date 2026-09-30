@@ -1,0 +1,53 @@
+# Sol variant: same three SuperNodes, but served by Flower (GPT-5.6 Sol) instead of Nebius Kimi.
+# Reads FLOWER_API_KEY from ./.env. FLWR_MODEL_API_ENDPOINT is intentionally NOT set (that is the Nebius switch).
+# Use: docker compose down && docker compose -f compose.sol.yaml up -d
+# Register keys first: see the runbook (flwr supernode register keys/supernode-N.pub supergrid ...).
+x-supernode: &supernode
+  image: flwr/supernode:1.39.0
+  restart: unless-stopped
+  environment: &env
+    FLWR_MODEL_API_KEY: ${FLOWER_API_KEY:?set FLOWER_API_KEY in .env}
+    AGENT_MODEL: openai/gpt-5.6-sol
+
+services:
+  supernode-0:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-0
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: invoice-reader
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-0
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-0:/data/node-0
+
+  supernode-1:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-1
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: vendor-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-1
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-1:/data/node-1
+
+  supernode-2:
+    <<: *supernode
+    command:
+      - --superlink=fleet-supergrid.flower.ai:443
+      - --auth-supernode-private-key=/keys/supernode-2
+      - --allow-runtime-dependency-installation
+    environment:
+      <<: *env
+      AGENT_LABEL: budget-checker
+      FLWR_FILESYSTEM_ALLOWED_DIRS: /data/node-2
+    volumes:
+      - ./keys:/keys:ro
+      - ./data/node-2:/data/node-2
