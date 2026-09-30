@@ -29,6 +29,16 @@ def _ledger():
     return SimulatedLedger()
 
 
+def _summary(result: dict) -> str:
+    """Plain-text outcome built from the signed result, for when no model can summarize."""
+    audit_line = (result.get("audit") or "").strip().splitlines()[-1:] or [""]
+    return (
+        f"Status: {result['status']}. Run ID: {result['run_id']}. "
+        f"Ledger: {result['ledger']}. Audit: {audit_line[0]}. "
+        f"Orchestration: {result['orchestration_note']}.\n\n{result['report']}"
+    )
+
+
 @app.main()
 def main(agent: AgentSession, context: Context) -> None:
     del context
@@ -45,6 +55,10 @@ def main(agent: AgentSession, context: Context) -> None:
             out_dir=Path(os.environ.get("ACCOUNTABILITY_DIR", "accountability-runs")),
         )
         text = json.dumps(result, sort_keys=True)
+        if result.get("orchestration") == "scripted":
+            # The orchestrator's model endpoint just failed; don't spend another call on it.
+            agent.events.emit({"type": "response.output_text.done", "text": _summary(result)})
+            return
     else:
         label = os.environ.get("AGENT_LABEL", "specialist")
         text = run_specialist(agent, client, config.model, label=label)

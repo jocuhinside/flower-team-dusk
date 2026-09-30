@@ -16,13 +16,17 @@ events are therefore NOT signed by the specialist; per-agent keys are a later st
 from __future__ import annotations
 
 import json
+import re
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import openai
 
 from .auditor import AuditFailedError, audit_run, finalize_run
 from .events import EventType, Recorder, digest_payload, save_log
@@ -45,6 +49,19 @@ ORCHESTRATOR_INSTRUCTIONS = (
 ORCHESTRATOR_MAX_TURNS = 4
 MAX_OUTPUT_TOKENS = 1500
 MODEL_CALL_TIMEOUT_S = 60
+
+# Scripted orchestration: used when the orchestrator's own model endpoint is unreachable.
+# Every model call then happens on the SuperNodes; the orchestrator only routes messages.
+SCRIPTED_SUBTASKS = (
+    ("invoice", "Extract the payee, amount, purpose and due date from this invoice request."),
+    ("vendor", "Check whether the payee is stated to be on the approved vendor list and note "
+               "any conflict-of-interest or missing-information concerns."),
+    ("budget", "Check the amount against the stated budget line and reserve rules; say whether "
+               "funds are sufficient."),
+)
+SCRIPTED_WAIT_S = 120
+ARBITER_WAIT_S = 60
+NO_DECISION = "HOLD (no PAY or HOLD decision from the arbiter)"
 
 FINAL_TURN_NOTE = (
     " Tool use has ended. Answer now using only the results you already have, and say "
@@ -304,6 +321,76 @@ def run_specialist(session: Any, client: Any, model: str, label: str = "speciali
     return text
 
 
+def _message_ids(output_item: dict[str, Any]) -> list[str]:
+    results = json.loads(output_item["output"])["results"]
+    return [r["message_id"] for r in results if r.get("message_id")]
+
+
+def _collect(grid: OrchestratorGrid, ids: list[str], wait_s: float) -> dict[str, str | None]:
+    """Pull until every id has a reply or the wait runs out. Returns reply bodies by id."""
+    bodies: dict[str, str | None] = {}
+    pending, deadline = list(ids), time.monotonic() + wait_s
+    while pending:
+        remaining = max(0.0, deadline - time.monotonic())
+        output = json.loads(grid.call({
+            "name": "pull_messages",
+            "arguments": json.dumps({"message_ids": pending, "timeout": min(30.0, remaining)}),
+            "call_id": f"sb-scripted-pull-{uuid.uuid4().hex[:8]}",
+        })["output"])
+        for reply in output["messages"]:
+            bodies[reply["reply_to_message_id"]] = reply.get("payload")
+        pending = [i for i in pending if i not in bodies]
+        if remaining <= 0:
+            break
+    return bodies
+
+
+def run_scripted_delegation(grid: OrchestratorGrid, prompt: str) -> str:
+    """Delegate fixed subtasks, then ask one SuperNode to arbitrate PAY or HOLD."""
+    nodes_out = json.loads(grid.call({
+        "name": "get_nodes", "arguments": json.dumps({"sample_size": None}),
+        "call_id": "sb-scripted-nodes",
+    })["output"])
+    nodes = [str(n["id"]) for n in nodes_out.get("nodes", [])]
+    if not nodes:
+        return f"No SuperNodes available.\nRecommendation: {NO_DECISION}"
+
+    messages = [
+        {"dst_node_id": nodes[i % len(nodes)], "payload": f"{task}\n\nRequest: {prompt}",
+         "reply_to_message_id": None}
+        for i, (_, task) in enumerate(SCRIPTED_SUBTASKS)
+    ]
+    ids = _message_ids(grid.call({
+        "name": "push_messages", "arguments": json.dumps({"messages": messages}),
+        "call_id": "sb-scripted-push",
+    }))
+    bodies = _collect(grid, ids, SCRIPTED_WAIT_S)
+    findings = [
+        f"- {label}: {bodies.get(msg_id) or 'no reply'}"
+        for (label, _), msg_id in zip(SCRIPTED_SUBTASKS, ids, strict=False)
+    ]
+
+    arbiter_task = (
+        "You are the arbiter for an HOA payment review. Based only on the findings below, "
+        "answer with PAY or HOLD followed by a one-sentence reason. Never authorize payment; "
+        f"two board members approve separately.\n\nRequest: {prompt}\n\nFindings:\n"
+        + "\n".join(findings)
+    )
+    arbiter_ids = _message_ids(grid.call({
+        "name": "push_messages",
+        "arguments": json.dumps({"messages": [
+            {"dst_node_id": nodes[0], "payload": arbiter_task, "reply_to_message_id": None}
+        ]}),
+        "call_id": "sb-scripted-arbiter",
+    }))
+    decision = None
+    if arbiter_ids:
+        decision = _collect(grid, arbiter_ids, ARBITER_WAIT_S).get(arbiter_ids[0])
+    if not decision or not re.search(r"\b(PAY|HOLD)\b", decision):
+        decision = NO_DECISION
+    return "Findings:\n" + "\n".join(findings) + f"\nRecommendation: {decision.strip()}"
+
+
 def run_orchestrator(
     session: Any,
     client: Any,
@@ -323,12 +410,22 @@ def run_orchestrator(
     grid = OrchestratorGrid(session.grid, recorder)
     grid._started_event_id = started.event_id
 
-    report = run_model_loop(
-        client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
-        max_turns=ORCHESTRATOR_MAX_TURNS,
-    )
+    orchestration, note = "model", ""
+    try:
+        report = run_model_loop(
+            client, model, ORCHESTRATOR_INSTRUCTIONS, session.prompt, grid,
+            max_turns=ORCHESTRATOR_MAX_TURNS,
+        )
+    except openai.APIError as error:
+        if grid._delegations:
+            raise  # work is already out; re-delegating would double it
+        orchestration = "scripted"
+        note = f"orchestrator model unavailable ({type(error).__name__}); scripted delegation"
+        _trace(note)
+        report = run_scripted_delegation(grid, session.prompt)
+    summary = "Combined specialist results" + (f" ({note})" if note else "")
     recorder.emit(
-        ORCHESTRATOR, ORCHESTRATOR, EventType.RESULT_PRODUCED, "Combined specialist results",
+        ORCHESTRATOR, ORCHESTRATOR, EventType.RESULT_PRODUCED, summary,
         output_payload=report,
     )
     ledger.mine_demo_block()
@@ -370,4 +467,6 @@ def run_orchestrator(
             for e in recorder.events
         ],
         "report": report,
+        "orchestration": orchestration,
+        "orchestration_note": note,
     }

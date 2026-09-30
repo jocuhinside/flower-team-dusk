@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from hackathon.auditor import audit_run
 from hackathon.events import load_log
 from hackathon.flower_agents import (
+    NO_DECISION,
     SpecialistGrid,
     model_tools,
     open_reply,
@@ -220,3 +221,58 @@ def test_specialist_grid_passes_other_tools_through() -> None:
 
 def test_model_tools_strips_output_schema() -> None:
     assert model_tools([{"name": "a", "output_schema": {}}]) == [{"name": "a"}]
+
+
+class DownClient:
+    """Model endpoint that never answers, like SuperGrid's service timing out."""
+
+    def __init__(self):
+        self.responses = self
+
+    def create(self, **kwargs):
+        import httpx
+        import openai
+
+        raise openai.APITimeoutError(request=httpx.Request("POST", "http://x"))
+
+
+class ArbiterGrid(FakeOrchestratorGrid):
+    """Replies to the arbiter message with a decision."""
+
+    def __init__(self, decision="HOLD: vendor not confirmed"):
+        super().__init__()
+        self.decision = decision
+
+    def call(self, tool_call):
+        out = super().call(tool_call)
+        if tool_call["name"] == "pull_messages" and "PAY or HOLD" in self.sent[0]["payload"]:
+            data = json.loads(out["output"])
+            payload = wrap_reply(self.decision, self.sent[0]["payload"], "n0", NOW)
+            data["messages"][0]["payload"] = payload
+            out = {**out, "output": json.dumps(data)}
+        return out
+
+
+def test_model_outage_falls_back_to_scripted_delegation(tmp_path: Path) -> None:
+    session = SimpleNamespace(prompt="Review invoice", grid=ArbiterGrid())
+    ledger = SimulatedLedger()
+    result = run_orchestrator(session, DownClient(), "m", ledger, tmp_path, clock())
+    assert result["status"] == "FINALIZED" and result["orchestration"] == "scripted"
+    assert "APITimeoutError" in result["orchestration_note"]
+    types = [e["type"] for e in result["events"]]
+    assert types.count("TASK_DELEGATED") == 4  # three subtasks plus the arbiter
+    assert "Recommendation: HOLD: vendor not confirmed" in result["report"]
+    assert audit_run(load_log(tmp_path / result["run_id"] / "events.jsonl"), ledger).passed
+
+
+def test_scripted_report_holds_when_arbiter_gives_no_decision(tmp_path: Path) -> None:
+    session = SimpleNamespace(prompt="Review invoice", grid=FakeOrchestratorGrid())
+    result = run_orchestrator(session, DownClient(), "m", SimulatedLedger(), tmp_path, clock())
+    assert "Recommendation: HOLD (no PAY or HOLD decision from the arbiter)" in result["report"]
+
+
+def test_scripted_decision_needs_pay_or_hold_as_a_word(tmp_path: Path) -> None:
+    session = SimpleNamespace(prompt="Review invoice", grid=ArbiterGrid("PAYMENT looks fine"))
+    result = run_orchestrator(session, DownClient(), "m", SimulatedLedger(), tmp_path, clock())
+    assert result["status"] == "FINALIZED"  # the reply verified; only the wording was rejected
+    assert result["report"].endswith(f"Recommendation: {NO_DECISION}")

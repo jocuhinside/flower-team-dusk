@@ -30,7 +30,7 @@ MODEL_VARS = ("AGENT_MODEL", "SPONSOR_MODEL")
 # Used when no model variable is set, e.g. inside a SuperGrid run where .env does not exist.
 # Override with AGENT_MODEL. Fallbacks if this stalls on SuperGrid: openai/gpt-5.6-terra, then
 # openai/gpt-5.6-sol. Not flwrlabs/endeavor-1.0: its providers returned 502 on SuperGrid.
-DEFAULT_MODEL = "openai/gpt-5.6-terra"
+DEFAULT_MODEL = "openai/gpt-5.6-sol"
 
 
 class ConfigurationError(RuntimeError):
