@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from hackathon.canonical import sha256
-from hackathon.config import ConfigurationError, SponsorConfig, status
+from hackathon.config import SponsorConfig, status
 from hackathon.schemas import Transaction
 from hackathon.workflow import ApprovalError, approve, finalize, prepare, verify
 
@@ -102,14 +102,15 @@ def test_sponsor_variables_take_precedence(monkeypatch: pytest.MonkeyPatch) -> N
     assert SponsorConfig.from_environment().api_key == "sponsor"
 
 
-def test_missing_model_is_named_in_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_model_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Since v0.1.1 a missing model variable falls back to DEFAULT_MODEL (SuperGrid has no .env).
+    for name in ("FLWR_RUNTIME_BASE_URL", "FLWR_RUNTIME_API_KEY", "AGENT_MODEL", "SPONSOR_MODEL"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SPONSOR_API_KEY", "k")
     monkeypatch.setenv("SPONSOR_BASE_URL", "https://s.example/v1")
-    monkeypatch.delenv("SPONSOR_MODEL", raising=False)
-    from hackathon.config import ConfigurationError
+    from hackathon.config import DEFAULT_MODEL
 
-    with pytest.raises(ConfigurationError, match="SPONSOR_MODEL"):
-        SponsorConfig.from_environment()
+    assert SponsorConfig.from_environment().model == DEFAULT_MODEL
 
 
 def test_runtime_variables_win_and_are_unmodified(monkeypatch):
@@ -143,13 +144,15 @@ def test_agent_model_overrides_sponsor_model(monkeypatch):
     assert config.runtime is False
 
 
-def test_runtime_without_model_fails_closed(monkeypatch):
+def test_runtime_without_model_uses_default(monkeypatch):
     monkeypatch.setenv("FLWR_RUNTIME_BASE_URL", "http://runtime.internal/v1")
     monkeypatch.setenv("FLWR_RUNTIME_API_KEY", "runtime-key")
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     monkeypatch.delenv("SPONSOR_MODEL", raising=False)
-    with pytest.raises(ConfigurationError, match="AGENT_MODEL"):
-        SponsorConfig.from_environment()
+    from hackathon.config import DEFAULT_MODEL
+
+    config = SponsorConfig.from_environment()
+    assert config.model == DEFAULT_MODEL and config.runtime is True
 
 
 def test_full_responses_endpoint_is_reduced_to_base_url(monkeypatch):
